@@ -1,34 +1,45 @@
-import pycom
+####################### GLOBAL SETUP ############################
 
-pycom.wdt_on_boot_timeout(360000)
-pycom.wdt_on_boot(True)
-pycom.heartbeat(False)
+SITE = '#####' ############################### Site Gateway Prefix
+key = b'################################' ### Encryption Key
 
-################## Start WLAN setup
+###################### Device Setup ############################
 
-SSID = 'AlphaX'
-PSWD = 'A!phaXI0T'
+import machine, utime, ubinascii, socket, pycom, crypto, gc
+from machine import I2C, deepsleep, Pin, Timer, WDT
+from network import LoRa, WLAN
+from crypto import AES
 
-################## End WLAN setup
+iv = crypto.getrandbits(128) # hardware generated random IV (never reuse it)
 
-import machine, ubinascii
-import utime, network
-from machine import Pin, Timer
+wdt = WDT(timeout=10000)  # enable it with a timeout of 2 seconds
+gc.enable()
 
-from network import WLAN
-wlan = WLAN()
-wlan.deinit()
-
-chrono = Timer.Chrono()
-chrono.start()
-
-sensorOn = machine.Pin('P23', mode=machine.Pin.OUT)
+sensorOn = machine.Pin('P11', mode=machine.Pin.OUT)
 sensorOn(1)
 sensorOn.hold(True)
 
-mac=ubinascii.hexlify(machine.unique_id(),':').decode()
-mac=mac.replace(":","")
-print("Network ID: ",mac)
+def mac():
+    mac=ubinascii.hexlify(machine.unique_id(),':').decode()
+    mac=mac.replace(":","")
+    return(mac)
+print("Network ID: ",mac())
+
+def encrypt(send_pkg):
+    cipher = AES(key, AES.MODE_CFB, iv)
+    send_pkg = iv + cipher.encrypt(send_pkg)
+    return(send_pkg)
+
+def LoRaSend(val,ch):
+    sl = socket.socket(socket.AF_LORA, socket.SOCK_RAW)
+    sl.setblocking(True)
+    sl.send(encrypt(SITE+mac()+'/'+ch+'&'+val)) # Send on LoRa Network & wait Reply
+    sl.setblocking(False)
+    try:
+        pycom.nvs_set('msgID',pycom.nvs_get('msgID')+1)
+    except:
+        pycom.nvs_set('msgID',0)
+    print("Sent",ch)
 
 print(machine.wake_reason())
 rst=machine.reset_cause()
@@ -39,13 +50,10 @@ def voltage():
     adc = ADC()
     vpin = adc.channel(pin='P13')
     for i in range (0,999):
-        volts+=vpin.voltage()
-    return volts/i/0.24444/1000
+        volts+=vpin.voltage()/0.24444/1000
+    print("volts/i)
+    return volts/i
 
-def mqttPub(topic,msg):
-    client.connect()
-    client.publish(topic,msg)
-    client.disconnect()
 
 if (machine.wake_reason()[0])==1: #pin wakeup
         
@@ -59,7 +67,7 @@ if (machine.wake_reason()[0])==1: #pin wakeup
     while chrono.read() < 5:
         pass
         
-    machine.pin_deepsleep_wakeup(pins = ['P8'], mode = machine.WAKEUP_ANY_HIGH, enable_pull = True)
+    machine.pin_deepsleep_wakeup(pins = ['P10'], mode = machine.WAKEUP_ANY_HIGH, enable_pull = True)
         
     print("RST1: Wake & Sleep")
     pycom.rgbled(0)
@@ -74,45 +82,12 @@ if (machine.wake_reason()[0])==1: #pin wakeup
 
 else: #RTC timer complete
 
-    pycom.rgbled(0x007f00) # green
-    # setup as a station
-    wlan = network.WLAN(mode=network.WLAN.STA)
-    wlan.connect(SSID, auth=(network.WLAN.WPA2, PSWD))
-    while not wlan.isconnected():
-        utime.sleep_ms(50)
-        if chrono.read() > 20:
-            print("no network")
-            machine.deepsleep(60000)
-
-    import socket       # Import socket module
-
-    s = socket.socket()         # Create a socket object
-    host = "192.168.4.1"           # Get local machine name
-    port = 9999              # Reserve a port for your service.
-    pycom.rgbled(0x00007f) # green
-        
-    total_count = pycom.nvs_get('counter')
-    voltage = voltage()
-    print('Sending Packet: {} people'.format(total_count))
-        
-    try:
-        s.connect(("192.168.4.1", 9999))
-    except Exception as e:
-        print("Socket Error: ",e)
-
-    try:
-        s.send(bytes(mac+'/1/data|{"val":'+str(total_count)+',"volt":'+str(voltage)+'}','utf-8'))
-    except:
-        pass
-
-    s.close()
+    string = '{"val":'+str(pycom.nvs_get('counter'))+',"msgID":'+str(pycom.nvs_get('num'))+',"volt":'+str(voltage())+'}'
+    LoRaSend(string,str(1))
     
     pycom.nvs_set('counter', 0)
         
-    machine.pin_deepsleep_wakeup(pins = ['P8'], mode = machine.WAKEUP_ANY_HIGH, enable_pull = True)
-        
-    print("RST2: Send & Sleep")
-    pycom.rgbled(0)
-        
-    utime.sleep(0.5)
-    machine.deepsleep(300000)
+    machine.pin_deepsleep_wakeup(pins = ['P10'], mode = machine.WAKEUP_ANY_HIGH, enable_pull = True)
+
+    gc.collect()
+    machine.deepsleep(3600000)
